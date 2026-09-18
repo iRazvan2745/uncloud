@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/netip"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -32,7 +33,60 @@ const (
 	LabelHook = "uncloud.service.hook"
 	// LabelHookPreDeploy indicates that the container is a pre-deploy hook that runs before deploying the service.
 	LabelHookPreDeploy = "pre-deploy"
+	// LabelNetworks lists the names of the logical networks the service is attached to, comma-separated.
+	// Uncloud itself does not enforce any connectivity rules based on this label. It only records the membership
+	// declared in the Compose `networks` key so external network policy controllers can enforce it.
+	LabelNetworks = "uncloud.networks"
+
+	// DefaultNetworkName is the name of the implicit logical network that a service joins when it does not declare
+	// any networks. It mirrors the Compose `default` network.
+	DefaultNetworkName = "default"
 )
+
+// reservedLabelPrefixes are the label namespaces owned by Uncloud. User-defined container labels must not use them
+// to avoid clashing with the labels Uncloud manages itself.
+var reservedLabelPrefixes = []string{"uncloud.", "uncloudd."}
+
+// ValidateUserLabels checks that user-defined container labels are well-formed and do not use a label namespace
+// reserved by Uncloud.
+func ValidateUserLabels(labels map[string]string) error {
+	for k := range labels {
+		if k == "" {
+			return fmt.Errorf("label name cannot be empty")
+		}
+		for _, prefix := range reservedLabelPrefixes {
+			if strings.HasPrefix(k, prefix) {
+				return fmt.Errorf("label '%s' uses reserved namespace '%s'", k, prefix)
+			}
+		}
+	}
+
+	return nil
+}
+
+// ParseNetworks parses a comma-separated list of logical network names as stored in LabelNetworks.
+// It returns the DefaultNetworkName if the list is empty, mirroring Compose semantics where a service that declares
+// no networks joins the default network.
+func ParseNetworks(value string) []string {
+	var networks []string
+	for name := range strings.SplitSeq(value, ",") {
+		if name = strings.TrimSpace(name); name != "" {
+			networks = append(networks, name)
+		}
+	}
+	if len(networks) == 0 {
+		return []string{DefaultNetworkName}
+	}
+	slices.Sort(networks)
+
+	return slices.Compact(networks)
+}
+
+// Networks returns the logical networks this container's service is attached to. A container that does not declare
+// any networks belongs to the implicit default network.
+func (c *ServiceContainer) Networks() []string {
+	return ParseNetworks(c.Config.Labels[LabelNetworks])
+}
 
 type Container struct {
 	container.InspectResponse

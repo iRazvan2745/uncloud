@@ -2,6 +2,7 @@ package deploy
 
 import (
 	"reflect"
+	"slices"
 	"sort"
 
 	"github.com/google/go-cmp/cmp"
@@ -25,6 +26,11 @@ func EvalContainerSpecChange(current api.ServiceSpec, new api.ServiceSpec) Conta
 		return ContainerNeedsRecreate
 	}
 	if current.Name != new.Name {
+		return ContainerNeedsRecreate
+	}
+	// Network membership is materialised as a container label, so it can only change by recreating the container.
+	// SetDefaults has already sorted, deduplicated and normalised both lists.
+	if !slices.Equal(current.Networks, new.Networks) {
 		return ContainerNeedsRecreate
 	}
 

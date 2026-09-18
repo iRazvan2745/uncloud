@@ -228,18 +228,31 @@ func TestLoadProject_Unsupported(t *testing.T) {
 			warnContains: []string{"dns"},
 		},
 		{
-			name: "unsupported networks",
+			name: "unsupported network aliases",
 			composeYAML: `services:
   app:
     image: myapp:latest
     networks:
-      - frontend
+      frontend:
+        aliases:
+          - www
 
 networks:
   frontend:
 `,
 			warnCount:    1,
-			warnContains: []string{"networks"},
+			warnContains: []string{"networks.aliases"},
+		},
+		{
+			name: "unsupported reserved label namespace",
+			composeYAML: `services:
+  app:
+    image: myapp:latest
+    labels:
+      uncloud.service.name: hijacked
+`,
+			warnCount:    1,
+			warnContains: []string{"reserved namespace"},
 		},
 		{
 			name: "unsupported depends_on service_completed_successfully",
@@ -295,6 +308,36 @@ secrets:
 
 networks:
   default:
+`,
+			warnCount: 0,
+		},
+		{
+			name: "supported custom networks",
+			composeYAML: `services:
+  app:
+    image: myapp:latest
+    networks:
+      - frontend
+      - backend
+
+  db:
+    image: postgres:latest
+    networks:
+      - backend
+
+networks:
+  frontend:
+  backend:
+`,
+			warnCount: 0,
+		},
+		{
+			name: "supported labels",
+			composeYAML: `services:
+  app:
+    image: myapp:latest
+    labels:
+      com.example.team: platform
 `,
 			warnCount: 0,
 		},

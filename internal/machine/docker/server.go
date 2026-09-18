@@ -550,21 +550,30 @@ func (s *Server) CreateServiceContainer(
 		}
 	}
 
+	// Start from the user-defined labels so Uncloud-managed labels always take precedence over them.
+	labels := make(map[string]string, len(spec.Container.Labels)+5)
+	maps.Copy(labels, spec.Container.Labels)
+	labels[api.LabelServiceID] = req.ServiceId
+	labels[api.LabelServiceName] = spec.Name
+	labels[api.LabelServiceMode] = spec.Mode
+	labels[api.LabelManaged] = ""
+	// Record the logical network membership so external network policy controllers can read it cluster-wide.
+	// An empty list means the implicit default network, which is left unlabelled to keep containers of services
+	// that don't use networks unchanged.
+	if len(spec.Networks) > 0 {
+		labels[api.LabelNetworks] = strings.Join(spec.Networks, ",")
+	}
+
 	config := &container.Config{
 		Cmd:        spec.Container.Command,
 		Env:        envVars.ToSlice(),
 		Entrypoint: spec.Container.Entrypoint,
 		Hostname:   containerName,
 		Image:      spec.Container.Image,
-		Labels: map[string]string{
-			api.LabelServiceID:   req.ServiceId,
-			api.LabelServiceName: spec.Name,
-			api.LabelServiceMode: spec.Mode,
-			api.LabelManaged:     "",
-		},
-		User:      spec.Container.User,
-		Tty:       spec.Container.Tty,
-		OpenStdin: spec.Container.OpenStdin,
+		Labels:     labels,
+		User:       spec.Container.User,
+		Tty:        spec.Container.Tty,
+		OpenStdin:  spec.Container.OpenStdin,
 	}
 	if spec.Mode == "" {
 		config.Labels[api.LabelServiceMode] = api.ServiceModeReplicated
@@ -690,6 +699,11 @@ func (s *Server) CreateServiceContainer(
 			api.LabelServiceName: spec.Name,
 			api.LabelHook:        api.LabelHookPreDeploy,
 			api.LabelManaged:     "",
+		}
+		// The hook inherits the service's network membership. It runs with the service's image and typically needs
+		// to reach the same dependencies, for example a database migration talking to the database.
+		if len(spec.Networks) > 0 {
+			config.Labels[api.LabelNetworks] = strings.Join(spec.Networks, ",")
 		}
 		config.Healthcheck = &container.HealthConfig{
 			Test: []string{"NONE"},

@@ -2066,3 +2066,69 @@ func TestEvalContainerSpecChange_Mixed(t *testing.T) {
 		})
 	}
 }
+
+func TestEvalContainerSpecChange_Networks(t *testing.T) {
+	t.Parallel()
+
+	specWith := func(networks ...string) api.ServiceSpec {
+		return api.ServiceSpec{
+			Container: api.ContainerSpec{Image: "nginx:latest"},
+			Networks:  networks,
+		}
+	}
+
+	t.Run("joining a network recreates", func(t *testing.T) {
+		t.Parallel()
+
+		current, updated := specWith(), specWith("my-network")
+		assert.Equal(t, ContainerNeedsRecreate, EvalContainerSpecChange(current, updated))
+		assert.Equal(t, ContainerNeedsRecreate, EvalContainerSpecChange(updated, current))
+	})
+
+	t.Run("changing a network recreates", func(t *testing.T) {
+		t.Parallel()
+
+		current, updated := specWith("frontend"), specWith("backend")
+		assert.Equal(t, ContainerNeedsRecreate, EvalContainerSpecChange(current, updated))
+	})
+
+	t.Run("adding a second network recreates", func(t *testing.T) {
+		t.Parallel()
+
+		current, updated := specWith("frontend"), specWith("frontend", "backend")
+		assert.Equal(t, ContainerNeedsRecreate, EvalContainerSpecChange(current, updated))
+	})
+
+	t.Run("reordering is not a change", func(t *testing.T) {
+		t.Parallel()
+
+		current, updated := specWith("frontend", "backend"), specWith("backend", "frontend")
+		assert.Equal(t, ContainerUpToDate, EvalContainerSpecChange(current, updated))
+	})
+
+	t.Run("explicit sole default equals implicit default", func(t *testing.T) {
+		t.Parallel()
+
+		current, updated := specWith(), specWith(api.DefaultNetworkName)
+		assert.Equal(t, ContainerUpToDate, EvalContainerSpecChange(current, updated))
+		assert.Equal(t, ContainerUpToDate, EvalContainerSpecChange(updated, current))
+	})
+}
+
+func TestEvalContainerSpecChange_ContainerLabels(t *testing.T) {
+	t.Parallel()
+
+	current := api.ServiceSpec{
+		Container: api.ContainerSpec{Image: "nginx:latest"},
+	}
+	updated := api.ServiceSpec{
+		Container: api.ContainerSpec{
+			Image:  "nginx:latest",
+			Labels: map[string]string{"com.example.team": "platform"},
+		},
+	}
+
+	assert.Equal(t, ContainerNeedsRecreate, EvalContainerSpecChange(current, updated))
+	assert.Equal(t, ContainerNeedsRecreate, EvalContainerSpecChange(updated, current))
+	assert.Equal(t, ContainerUpToDate, EvalContainerSpecChange(updated, updated))
+}

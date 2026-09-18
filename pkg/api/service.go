@@ -43,6 +43,10 @@ const (
 var (
 	serviceIDRegexp = regexp.MustCompile("^[0-9a-f]{32}$")
 	dnsLabelRegexp  = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
+	// networkNameRegexp matches the Compose top-level network names. Unlike a service name, a network name is never
+	// used as a DNS name, so underscores and uppercase letters are allowed. A comma is excluded because the
+	// membership is stored as a comma-separated container label.
+	networkNameRegexp = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
 )
 
 func ValidateServiceID(id string) bool {
@@ -62,6 +66,11 @@ type ServiceSpec struct {
 	// Mode is the replication mode of the service. Default is ServiceModeReplicated if empty.
 	Mode string
 	Name string
+	// Networks are the names of the logical networks this service is attached to, mirroring the Compose `networks`
+	// key. An empty list means the service belongs to the implicit DefaultNetworkName network.
+	// Uncloud does not enforce connectivity itself. It records the membership as the LabelNetworks container label
+	// so an external network policy controller can enforce isolation.
+	Networks []string `json:",omitempty"`
 	// Placement defines the placement constraints for the service.
 	Placement Placement
 	// Ports defines what service ports to publish to make the service accessible outside the cluster.
@@ -128,6 +137,17 @@ func (s *ServiceSpec) SetDefaults() ServiceSpec {
 	}
 	spec.Container = spec.Container.SetDefaults()
 
+	// Normalise the network membership so specs that declare the same networks in a different order or with
+	// duplicates compare as equal and don't trigger a spurious container recreate.
+	if len(spec.Networks) > 0 {
+		slices.Sort(spec.Networks)
+		spec.Networks = slices.Compact(spec.Networks)
+		// An explicit sole "default" membership is equivalent to declaring nothing at all.
+		if len(spec.Networks) == 1 && spec.Networks[0] == DefaultNetworkName {
+			spec.Networks = nil
+		}
+	}
+
 	for i, v := range spec.Volumes {
 		spec.Volumes[i] = v.SetDefaults()
 	}
@@ -160,6 +180,16 @@ func (s *ServiceSpec) Validate() error {
 		if (p.Mode == "" || p.Mode == PortModeIngress) &&
 			p.Protocol != ProtocolHTTP && p.Protocol != ProtocolHTTPS {
 			return fmt.Errorf("unsupported protocol for ingress port %d: %s", p.ContainerPort, p.Protocol)
+		}
+	}
+
+	for _, n := range s.Networks {
+		if len(n) > 63 {
+			return fmt.Errorf("network name too long (max 63 characters): %q", n)
+		}
+		if !networkNameRegexp.MatchString(n) {
+			return fmt.Errorf("invalid network name: %q. must be 1-63 characters of letters, numbers, "+
+				"underscores, dots and dashes, and must start with a letter or number", n)
 		}
 	}
 
@@ -227,6 +257,10 @@ func (s *ServiceSpec) Clone() ServiceSpec {
 	spec.Container = s.Container.Clone()
 	spec.PreDeploy = s.PreDeploy.Clone()
 
+	if s.Networks != nil {
+		spec.Networks = slices.Clone(s.Networks)
+	}
+
 	if s.Ports != nil {
 		spec.Ports = make([]PortSpec, len(s.Ports))
 		copy(spec.Ports, s.Ports)
@@ -261,6 +295,11 @@ type ContainerSpec struct {
 	Image       string
 	// Run a custom init inside the container. If nil, use the daemon's configured settings.
 	Init *bool
+	// Labels are user-defined Docker labels applied to the container. They are propagated to the cluster store
+	// and are readable cluster-wide, which lets external controllers attach their own metadata to a service.
+	// Labels in the reserved "uncloud." and "uncloudd." namespaces are rejected to avoid clashing with the labels
+	// managed by Uncloud itself.
+	Labels map[string]string `json:",omitempty"`
 	// LogDriver overrides the default logging driver for the container. Each Docker daemon can have its own default.
 	LogDriver *LogDriver
 	// PidMode sets the PID namespace mode for the container. Currently only "" or "host" is supported.
@@ -314,6 +353,10 @@ func (s *ContainerSpec) SetDefaults() ContainerSpec {
 func (s *ContainerSpec) Validate() error {
 	if _, err := reference.ParseDockerRef(s.Image); err != nil {
 		return fmt.Errorf("invalid image '%s': %w", s.Image, err)
+	}
+
+	if err := ValidateUserLabels(s.Labels); err != nil {
+		return fmt.Errorf("invalid label: %w", err)
 	}
 
 	for _, m := range s.VolumeMounts {
@@ -371,6 +414,10 @@ func (s *ContainerSpec) Clone() ContainerSpec {
 		hc := *s.Healthcheck
 		hc.Test = slices.Clone(s.Healthcheck.Test)
 		spec.Healthcheck = &hc
+	}
+	if s.Labels != nil {
+		spec.Labels = make(map[string]string, len(s.Labels))
+		maps.Copy(spec.Labels, s.Labels)
 	}
 	if s.LogDriver != nil {
 		logDriver := *s.LogDriver

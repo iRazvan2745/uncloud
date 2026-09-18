@@ -53,6 +53,7 @@ func ServiceSpecFromCompose(project *types.Project, serviceName string) (api.Ser
 			Healthcheck: healthcheckFromCompose(service.HealthCheck),
 			Image:       service.Image,
 			Init:        service.Init,
+			Labels:      labelsFromCompose(service.Labels),
 			PidMode:     service.Pid,
 			Tty:         service.Tty,
 			OpenStdin:   service.StdinOpen,
@@ -62,8 +63,9 @@ func ServiceSpecFromCompose(project *types.Project, serviceName string) (api.Ser
 			Sysctls:     service.Sysctls,
 			User:        service.User,
 		},
-		Name: serviceName,
-		Mode: api.ServiceModeReplicated,
+		Name:     serviceName,
+		Mode:     api.ServiceModeReplicated,
+		Networks: networksFromCompose(service.Networks),
 	}
 
 	// Map x-caddy extension to spec.Caddy if specified.
@@ -375,6 +377,33 @@ func mergeLabels(labels ...types.Labels) types.Labels {
 	return merged
 }
 
+// labelsFromCompose converts the user-defined labels of a Compose service to container spec labels.
+// It deliberately ignores service.CustomLabels, which Compose populates with local project metadata such as the
+// working directory and config file paths. Those would make the spec depend on where the Compose file lives and
+// cause containers to be recreated whenever it moves.
+func labelsFromCompose(labels types.Labels) map[string]string {
+	if len(labels) == 0 {
+		return nil
+	}
+
+	return maps.Clone(labels)
+}
+
+// networksFromCompose converts the networks a Compose service is attached to into a sorted list of network names.
+// Returns nil if the service only belongs to the default network, which is the implicit membership in Uncloud.
+func networksFromCompose(networks map[string]*types.ServiceNetworkConfig) []string {
+	if len(networks) == 0 {
+		return nil
+	}
+
+	names := slices.Sorted(maps.Keys(networks))
+	if len(names) == 1 && names[0] == api.DefaultNetworkName {
+		return nil
+	}
+
+	return names
+}
+
 func tmpfsVolumeSpecFromCompose(serviceVolume types.ServiceVolumeConfig) api.VolumeSpec {
 	// compose-go parser deduplicates volumes by the target path so it's safe to use it as the unique name.
 	name := "tmpfs-" + digest.SHA256.FromString(serviceVolume.Target).Encoded()
@@ -481,7 +510,9 @@ func validateServicesFeatures(project *types.Project) []error {
 			errs = append(errs, err(service.Name, "dns_search"))
 		}
 		if service.Labels != nil {
-			errs = append(errs, err(service.Name, "labels"))
+			if lErr := api.ValidateUserLabels(service.Labels); lErr != nil {
+				errs = append(errs, fmt.Errorf("service '%s': %w", service.Name, lErr))
+			}
 		}
 		if service.Links != nil {
 			errs = append(errs, err(service.Name, "links"))
@@ -521,12 +552,17 @@ func validateServicesFeatures(project *types.Project) []error {
 				errs = append(errs, err(service.Name, "deploy labels"))
 			}
 		}
-		// we only allow the 'default' network, nothing else.
-		if x := service.Networks; x != nil {
-			if len(x) != 1 {
-				errs = append(errs, err(service.Name, "networks"))
-			} else if _, ok := x["default"]; !ok {
-				errs = append(errs, err(service.Name, "networks"))
+		// Services may be attached to any named networks. Uncloud keeps all containers on one flat cluster network
+		// and only records the membership on the container so an external network policy controller can enforce it.
+		for name, cfg := range service.Networks {
+			if cfg != nil && cfg.Aliases != nil {
+				errs = append(errs, err(service.Name, "networks.aliases"))
+			}
+			if cfg != nil && (cfg.Ipv4Address != "" || cfg.Ipv6Address != "") {
+				errs = append(errs, err(service.Name, "networks.ipv?_address"))
+			}
+			if name == "" {
+				errs = append(errs, fmt.Errorf("service '%s': network name cannot be empty", service.Name))
 			}
 		}
 
